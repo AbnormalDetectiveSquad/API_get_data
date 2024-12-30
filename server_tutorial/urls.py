@@ -24,6 +24,7 @@ from collector.views import (
     collect_data_section_view,
     collect_data_direction_view,
     collect_data_DivRoad_view,
+    collect_data_its_eventInfo
 )
 
 urlpatterns = [
@@ -36,4 +37,5 @@ urlpatterns = [
     path('collect_section/',     collect_data_section_view,     name='collect_section'),
     path('collect_direction/',   collect_data_direction_view,   name='collect_direction'),
     path('collect_divroad/',   collect_data_DivRoad_view,   name='collect_divroad'),
+    path('collect_its_eventInfo/',   collect_data_its_eventInfo,   name='collect_its_eventInfo'),
 ]

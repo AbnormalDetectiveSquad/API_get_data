@@ -74,7 +74,7 @@ def home_view(request):
     </head>
     <body>
         <div class="container">
-            <h1>서울특별시 TOPIS OPEN API</h1>
+            <h1>서울특별시 OPEN API</h1>
             <div class="links">
                 <a href="/collect_citywall/">한양도성 도로통계</a>
                 <a href="/collect_road/">도로별 통계</a>
@@ -82,6 +82,7 @@ def home_view(request):
                 <a href="/collect_section/">구간별 통계</a>
                 <a href="/collect_direction/">도로별 방향별 통계</a>
                 <a href="/collect_divroad/">도로구분별 통계</a>
+                <a href="/collect_its_eventInfo/">ITS 돌발상황정보</a>
             </div>
         </div>
     </body>
@@ -328,6 +329,169 @@ def _common_collect_logic(request, base_url: str):
     return HttpResponse(html_content)
 
 
+def _its_collect_logic(request, base_url: str, api_key: str,
+                       road_type: str = "all",
+                       event_type: str = "all",
+                       bbox: dict = None):
+    """
+    ITS API 호출을 위한 공통 로직
+    TOPIS와 달리 실시간 데이터를 조회하므로 날짜 기반 반복 호출은 하지 않음
+
+    Parameters:
+    - road_type: 도로 유형 (all/ex/its/loc/sgg/etc)
+    - event_type: 이벤트 유형 (all/cor/acc/wea/ete/dis/etc)
+    - bbox: 검색 영역 좌표 (선택)
+    """
+    # 필수 파라미터 검증
+    if not api_key:
+        return HttpResponse("<h1>API 키가 필요합니다.</h1>")
+
+    if road_type not in ["all", "ex", "its", "loc", "sgg", "etc"]:
+        return HttpResponse("<h1>잘못된 도로 유형입니다.</h1>")
+
+    if event_type not in ["all", "cor", "acc", "wea", "ete", "dis", "etc"]:
+        return HttpResponse("<h1>잘못된 이벤트 유형입니다.</h1>")
+
+    # 기본 파라미터
+    params = {
+        "apiKey": api_key,
+        "type": road_type,
+        "eventType": event_type,
+        "getType": "json"
+    }
+
+    # 검색 영역이 지정된 경우에만 좌표 파라미터 추가
+    if bbox:
+        params.update({
+            "minX": bbox.get("minX"),
+            "maxX": bbox.get("maxX"),
+            "minY": bbox.get("minY"),
+            "maxY": bbox.get("maxY")
+        })
+
+    try:
+        response = requests.get(base_url, params=params, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+
+        # API 응답 코드 확인
+        result_code = data['header'].get('resultCode')
+        result_msg = data['header'].get('resultMsg')
+
+        if result_code != 0:  # 실패
+            return HttpResponse(f"""
+                <h1>API 오류</h1>
+                <p>응답 코드: {result_code}</p>
+                <p>오류 메시지: {result_msg}</p>
+            """)
+
+        # 데이터가 없는 경우
+        total_count = int(data['body'].get('totalCount', 0))
+        if total_count == 0:
+            return HttpResponse("<h1>조회된 데이터가 없습니다.</h1>")
+
+        # body 데이터 확인
+        df = pd.DataFrame(data['body']['items'])
+
+        # 컬럼 매핑 정보 (API 응답의 실제 컬럼명에 맞게 수정)
+        columns_map = {
+            'roadname': '도로명',
+            'enddate': '종료일시',
+            'startdate': '발생일시',
+            'eventtype': '이벤트유형',
+            'eventdetailtype': '이벤트세부유형',
+            'coordx': '경도',
+            'coordy': '위도',
+            'linkid': '링크ID',
+            'roadno': '도로번호',
+            'roadDrctype': '도로방향',
+            'lanesblocktype': '차단유형',
+            'lanesblocked': '차단차로',
+            'message': '돌발내용'
+        }
+
+        # 대소문자를 무시하고 매핑
+        df.columns = df.columns.str.lower()
+        existing_columns = [col for col in columns_map.keys() if col in df.columns]
+
+        # 컬럼 이름 변경
+        df = df.rename(columns={col: columns_map[col] for col in existing_columns})
+
+        # 날짜 포맷 변경 (YYYYMMDDHH24MISS -> YYYY-MM-DD HH:MM:SS)
+        date_columns = ['발생일시', '종료일시']
+        for col in date_columns:
+            if col in df.columns:
+                df[col] = df[col].apply(
+                    lambda x: f"{x[:4]}-{x[4:6]}-{x[6:8]} {x[8:10]}:{x[10:12]}:{x[12:]}" if pd.notnull(x) and len(
+                        str(x)) == 14 else x)
+
+        # HTML 테이블 생성
+        html_table = df.to_html(classes="table table-bordered", index=False)
+
+        html_content = f"""
+        <html>
+          <head>
+            <title>ITS 공사/사고정보</title>
+            <style>
+                .table {{
+                    width: 100%;
+                    border-collapse: collapse;
+                    margin: 20px 0;
+                }}
+                .table th, .table td {{
+                    border: 1px solid #ddd;
+                    padding: 8px;
+                    text-align: left;
+                }}
+                .table th {{
+                    background-color: #f5f5f5;
+                }}
+                .info {{
+                    background-color: #f8f9fa;
+                    padding: 15px;
+                    border-radius: 5px;
+                    margin: 10px 0;
+                }}
+            </style>
+          </head>
+          <body>
+            <p><a href="/">[홈으로 돌아가기]</a></p>
+
+            <div class="info">
+                <h2>API 응답 정보</h2>
+                <ul>
+                    <li>응답 코드: {result_code}</li>
+                    <li>응답 메시지: {result_msg}</li>
+                    <li>총 데이터 수: {total_count}건</li>
+                </ul>
+
+                <h3>조회 조건</h3>
+                <ul>
+                    <li>도로 유형: {road_type}</li>
+                    <li>이벤트 유형: {event_type}</li>
+                    {f'<li>검색 영역: {bbox}</li>' if bbox else ''}
+                </ul>
+            </div>
+
+            <h2>최종 호출 API URL</h2>
+            <p>{response.url}</p>
+
+            <h1>ITS 공사/사고정보 현황</h1>
+            {html_table}
+          </body>
+        </html>
+        """
+        return HttpResponse(html_content)
+
+    except requests.exceptions.RequestException as e:
+        error_msg = f"""
+        <h1>오류 발생</h1>
+        <p>API 호출 중 오류가 발생했습니다: {str(e)}</p>
+        <p>URL: {base_url}</p>
+        """
+        return HttpResponse(error_msg)
+
+
 def collect_data_citywall_view(request):
     """
     [한양도성 도로통계]
@@ -394,3 +558,33 @@ def collect_data_DivRoad_view(request):
         "TopisIccStTimesRoadDivTrfRoadStats/1.0"
     )
     return _common_collect_logic(request, base_url)
+
+
+def collect_data_its_eventInfo(request):
+    """
+    [공사ㆍ사고정보 데이터]
+    - ITS API를 통해 실시간 공사/사고 정보를 조회
+    """
+    base_url = "https://openapi.its.go.kr:9443/eventInfo"
+    api_key = "25b9372d7c39424aa49f2c27c47c6276"  # 실제 ITS API 키로 교체 필요
+
+    # 서울시 영역 좌표 (선택적)
+    seoul_bbox = {
+        "minX": "126.734086",
+        "maxX": "127.269311",
+        "minY": "37.413294",
+        "maxY": "37.715133"
+    }
+
+    # URL 파라미터에서 도로/이벤트 유형 가져오기 (기본값: all)
+    road_type = request.GET.get('road_type', 'all')
+    event_type = request.GET.get('event_type', 'all')
+
+    return _its_collect_logic(
+        request=request,
+        base_url=base_url,
+        api_key=api_key,
+        road_type=road_type,
+        event_type=event_type,
+        bbox=seoul_bbox
+    )
