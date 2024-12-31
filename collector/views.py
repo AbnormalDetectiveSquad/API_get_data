@@ -83,6 +83,7 @@ def home_view(request):
                 <a href="/collect_direction/">도로별 방향별 통계</a>
                 <a href="/collect_divroad/">도로구분별 통계</a>
                 <a href="/collect_its_eventInfo/">ITS 돌발상황정보</a>
+                <a href="/collect_its_traficInfo/">ITS 교통소통정보</a>
             </div>
         </div>
     </body>
@@ -329,10 +330,7 @@ def _common_collect_logic(request, base_url: str):
     return HttpResponse(html_content)
 
 
-def _its_collect_logic(request, base_url: str, api_key: str,
-                       road_type: str = "all",
-                       event_type: str = "all",
-                       bbox: dict = None):
+def _its_collect_logic(request, input_params: dict, bbox: dict = None):#API 마다 필수 입력 변수 차이 때문에 입력 파라미터를 딕셔너리로 받고 option 항목에 따라 분기 처리 하도록 변경
     """
     ITS API 호출을 위한 공통 로직
     TOPIS와 달리 실시간 데이터를 조회하므로 날짜 기반 반복 호출은 하지 않음
@@ -343,24 +341,59 @@ def _its_collect_logic(request, base_url: str, api_key: str,
     - bbox: 검색 영역 좌표 (선택)
     """
     # 필수 파라미터 검증
-    if not api_key:
-        return HttpResponse("<h1>API 키가 필요합니다.</h1>")
+    event_type = None
+    base_url = input_params.get("base_url") 
+    option = input_params.get("option")
+    if option == "eventInfo":
+        api_key = input_params.get("api_key")
+        road_type = input_params.get("road_type")
+        event_type = input_params.get("event_type")
+        if not api_key:
+            return HttpResponse("<h1>API 키가 필요합니다.</h1>")
 
-    if road_type not in ["all", "ex", "its", "loc", "sgg", "etc"]:
-        return HttpResponse("<h1>잘못된 도로 유형입니다.</h1>")
+        if road_type not in ["all", "ex", "its", "loc", "sgg", "etc"]:
+            return HttpResponse("<h1>잘못된 도로 유형입니다.</h1>")
 
-    if event_type not in ["all", "cor", "acc", "wea", "ete", "dis", "etc"]:
-        return HttpResponse("<h1>잘못된 이벤트 유형입니다.</h1>")
+        if event_type not in ["all", "cor", "acc", "wea", "ete", "dis", "etc"]:
+            return HttpResponse("<h1>잘못된 이벤트 유형입니다.</h1>")
 
-    # 기본 파라미터
-    params = {
-        "apiKey": api_key,
-        "type": road_type,
-        "eventType": event_type,
-        "getType": "json"
-    }
+        # 기본 파라미터
+        params = {
+            "apiKey": api_key,
+            "type": road_type,
+            "eventType": event_type,
+            "getType": "json"
+        }
 
-    # 검색 영역이 지정된 경우에만 좌표 파라미터 추가
+    elif option == "traficInfo":
+        api_key = input_params.get("api_key")
+        road_type = input_params.get("road_type")
+        routeNo = input_params.get("routeNo")
+        drcType = input_params.get("drcType")
+        if not api_key:
+            return HttpResponse("<h1>API 키가 필요합니다.</h1>")
+
+        if road_type not in ["all", "ex", "its", "loc", "sgg", "etc"]:
+            return HttpResponse("<h1>잘못된 도로 유형입니다.</h1>")
+
+        if routeNo != "all":
+            try:
+                int(routeNo)  # 정수 변환 시도
+            except ValueError:
+                return HttpResponse("<h1>잘못된 도로번호 유형입니다.</h1>")
+        if drcType not in ["all", "up", "down", "start", "end"]:
+            return HttpResponse("<h1>잘못된 도로 방향 유형입니다.</h1>")
+
+        # 기본 파라미터
+        params = {
+            "apiKey": api_key,
+            "type": road_type,
+            "routeNo": routeNo,
+            "drcType": drcType,
+            "getType": "json"
+        }
+
+        # 검색 영역이 지정된 경우에만 좌표 파라미터 추가
     if bbox:
         params.update({
             "minX": bbox.get("minX"),
@@ -368,7 +401,6 @@ def _its_collect_logic(request, base_url: str, api_key: str,
             "minY": bbox.get("minY"),
             "maxY": bbox.get("maxY")
         })
-
     try:
         response = requests.get(base_url, params=params, timeout=10)
         response.raise_for_status()
@@ -404,10 +436,17 @@ def _its_collect_logic(request, base_url: str, api_key: str,
             'coordy': '위도',
             'linkid': '링크ID',
             'roadno': '도로번호',
-            'roadDrctype': '도로방향',
+            'roaddrctype': '도로방향',
             'lanesblocktype': '차단유형',
             'lanesblocked': '차단차로',
-            'message': '돌발내용'
+            'message': '돌발내용',
+            # 쿄통 소통 정보 추가 컬럼
+            'speed': '통행 속도',
+            'startnodeid': '시작노드ID',
+            'endnodeid': '종료노드ID',
+            'traveltime': '통행시간(초)',
+            'createddate': '생성일시',
+            'linkno': '링크번호',
         }
 
         # 대소문자를 무시하고 매핑
@@ -418,7 +457,7 @@ def _its_collect_logic(request, base_url: str, api_key: str,
         df = df.rename(columns={col: columns_map[col] for col in existing_columns})
 
         # 날짜 포맷 변경 (YYYYMMDDHH24MISS -> YYYY-MM-DD HH:MM:SS)
-        date_columns = ['발생일시', '종료일시']
+        date_columns = ['발생일시', '종료일시','생성일시']#쿄통 소통 정보용 생성일시 추가
         for col in date_columns:
             if col in df.columns:
                 df[col] = df[col].apply(
@@ -468,7 +507,7 @@ def _its_collect_logic(request, base_url: str, api_key: str,
                 <h3>조회 조건</h3>
                 <ul>
                     <li>도로 유형: {road_type}</li>
-                    <li>이벤트 유형: {event_type}</li>
+                    {f'<li>이벤트 유형: {event_type}</li>' if event_type else ''}
                     {f'<li>검색 영역: {bbox}</li>' if bbox else ''}
                 </ul>
             </div>
@@ -582,9 +621,47 @@ def collect_data_its_eventInfo(request):
 
     return _its_collect_logic(
         request=request,
-        base_url=base_url,
-        api_key=api_key,
-        road_type=road_type,
-        event_type=event_type,
+        input_params={
+            "base_url":base_url,
+            "api_key":api_key,
+            "road_type":road_type,
+            "event_type":event_type,
+            "option" : "eventInfo"
+        },
+        bbox=seoul_bbox
+    )
+
+def collect_data_its_traficInfo(request):
+    """
+    [공사ㆍ사고정보 데이터]
+    - ITS API를 통해 5분단위 교통 소통 정보 조회
+    """
+    base_url = "https://openapi.its.go.kr:9443/trafficInfo"
+    api_key = "25b9372d7c39424aa49f2c27c47c6276"  # 실제 ITS API 키로 교체 필요
+
+    # 서울시 영역 좌표 (선택적)
+    seoul_bbox = {
+        "minX": "126.734086",
+        "maxX": "127.269311",
+        "minY": "37.413294",
+        "maxY": "37.715133"
+    }
+
+    # URL 파라미터에서 도로/이벤트 유형 가져오기 (기본값: all)
+    road_type = request.GET.get('road_type', 'all')
+    routeNo = request.GET.get('routeNo', 'all')
+    drcType = request.GET.get('drcType', 'all')
+
+
+    return _its_collect_logic(
+        request=request,
+        input_params={
+            "base_url":base_url,
+            "api_key":api_key,
+            "road_type":road_type,
+            "routeNo":routeNo,
+            "drcType":drcType,
+            "option" : "traficInfo"
+        },
         bbox=seoul_bbox
     )
